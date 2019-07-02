@@ -1,7 +1,5 @@
-# This tool imports all advisories from ICS-CERT
+# This tool imports all vulnerabilities from ICS-CERT
 # The vulnerabilities will be classified by vendor and for each vulnerability the exploitability, affected product and vulnerability will be stored in a CSV
-# many improvements can still be made, like automatically selecting the right urls fromt he sourceurl: https://ics-cert.us-cert.gov/advisories-by-vendor-last-revised-date, adding more fields and better encoding optimizing and normaling regex.
-# However it works for its current purpose so thats on the backlog.
 
 import re
 from urllib.request import urlopen,Request
@@ -236,11 +234,14 @@ def getVulType(input,link):
 	
 	return(result)
 	
-	
+
 def mainProgram():
 	textfile = open("data.txt", 'r')
 	crawler = {'User-Agent': "ICS-Info-Crawler"}
-
+	#fullList = urlopen(Request(url="https://ics-cert.us-cert.gov/advisories-by-vendor", headers=crawler)).read().decode('ISO-8859-1')
+	#vendorChunk = str(((fullList.split('<div class="view-content">')[1]).split('</div></section>')[0]).encode("utf-8","ignore"))
+	
+	staticURL = "https://www.us-cert.gov/ics/advisories-by-vendor?page="
 	currentVendor = ""
 	advisories = ""
 	link = ""
@@ -250,31 +251,32 @@ def mainProgram():
 	versions = ""
 	vultypes = ""
 	result = ""
-
-
-	for line in textfile:
-		if(re.match("(.*)<h3>(.*)</h3>(.*)", line)):
-			currentVendor = re.findall("<h3>(.*)</h3>", line)[0]
 	
-		if(re.match("(.*)<a href(.*)",line)):
-			advisories = re.findall("<a href=\"(.*)\">", line)
-			product = re.findall("<a href=\"(.*)\">(.*)</a>",line)
-			product = max(product)
-			link = "https://ics-cert.us-cert.gov/" + advisories[0]
+	for x in range(0, 12):
+		tmpUrl = staticURL + str(x)
 
-			vulnerabilityDetails = urlopen(Request(url=link, headers=crawler)).read().decode('ISO-8859-1')
-			CVSS = getCVSS(vulnerabilityDetails, link)
-			exploitability = getExploitability(vulnerabilityDetails, link)
-			versions = getAffectedVersions(vulnerabilityDetails, link)
-			vultypes = getVulType(vulnerabilityDetails,link)
+		tmpList = urlopen(Request(url=tmpUrl, headers=crawler)).read().decode('ISO-8859-1')
+		tmpVendors = tmpList.split('<div class="view-content">')[1].split('<nav class="pager-nav text-center"')[0].replace('<div class="item-list">','').split('<h3>')
+		
+		
+		for tmpVendor in tmpVendors:
+			currentVendor = tmpVendor.split("</h3>")[0]
+			advisories = re.findall("<a href=\"(.*)</a>", tmpVendor)
 			
-			#Fixing the latest errors to avoid breaking the CVS structure
-			result = str(currentVendor).replace(',','') + "," + str(link).replace(',','')  + "," + str(CVSS).replace(',','')  + "," + str(exploitability).replace(',','')  + "," + str(versions).replace(',','')  + "," + str(vultypes).replace(',','')
+			for advisory in advisories:
+				tmpLinkProduct = "https://www.us-cert.gov/" + advisory.replace('" hreflang="en','')
+				link = tmpLinkProduct.split(">")[0].replace('"','')
+				product = tmpLinkProduct.split(">")[1]
+				vulnerabilityDetails = urlopen(Request(url=link, headers=crawler)).read().decode('ISO-8859-1')
+				
+				CVSS = getCVSS(vulnerabilityDetails, link)
+				exploitability = getExploitability(vulnerabilityDetails, link)
+				versions = getAffectedVersions(vulnerabilityDetails, link)
+				vultypes = getVulType(vulnerabilityDetails,link)
 			
-			print(result.encode("utf-8","ignore"))
-
-
-
+				result = str(currentVendor).replace(',','') + "," + str(link).replace(',','')  + "," + str(CVSS).replace(',','')  + "," + str(exploitability).replace(',','')  + "," + str(versions).replace(',','')  + "," + str(vultypes).replace(',','')
+			
+				print(result.encode("utf-8","ignore"))	
 
 # Main program
 print("Vendor, product, advisoryLink,CVSS, public exploit, affected versions, vulnerability type")
