@@ -1,0 +1,21 @@
+def genTable(alfabet):
+	lookUpDictionary = {}
+	for char in alfabet:
+		key = ((123 * char + 18) % 256)
+		lookUpDictionary[key] = char
+		#encodedAlfabet.append((123 * char + 18) % 256)
+	return lookUpDictionary
+
+
+def decrypt(lookupTable,cipher):
+	result=''
+	for char in cipher:
+		result += (chr(lookupTable[char]))
+	return result
+	
+def main():
+	alfabet = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789{}_ "
+	cipher = bytes.fromhex('aa6ec82bf622227bb70e7fb7352249b7d893c493d8539dec8fb7935d490e7f9d22ec89b7a322ec8fd80e7f8921')
+	print(decrypt(genTable(alfabet),cipher))
+
+main()
