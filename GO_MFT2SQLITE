@@ -1,0 +1,766 @@
+package main
+
+import "fmt"
+import "os"
+import "bytes"
+import "encoding/binary"
+import "strconv"
+import "strings"
+import "flag"
+import "database/sql"
+import _ "github.com/mattn/go-sqlite3"	// Importing with _, to ensure the driver is important
+
+// Todo: to speed up some of the conversation I transposed some of the byte areas in the struct to unsigned intetegers: [8]byte -> uint32 etc.
+//		However, as the goal of the script is to isolate the MFT, I only changed the structs needed for this program, if you want to use the structure for
+//		additional functionality you should change this.
+ 
+// *** Structs to capture data in a structurized way
+type GPTHEADER struct{
+	 // Based on table from: http://ntfs.com/guid-part-table.htm
+	signature [8]byte 
+	revision [4]byte
+	headerSize uint16		//92 should be used, leaving 420 zeros at the end
+	crc32 [4]byte
+	reserved [4]byte
+	currentLBA uint32
+	backupLBA uint32
+	firstLBA uint32
+	lastLBA uint32
+	diskGUID [16]byte
+	partitionEntriesLBA uint32
+	numberOfPartitions uint32
+	partitionEntrySize uint32
+	crc32PartitionEntry [4]byte
+	emptySpace [0]byte
+}
+
+type PARTITIONENTRY struct{
+	// Based on table from: https://wiki.osdev.org/GPT
+	partitionGUID [16]byte
+	uniquePartitionGUID [16]byte
+	startingLBA uint32
+	endingLBA uint32
+	attributes [8]byte
+	partitionName [72]byte
+}
+
+type NTFS_BOOT_PARTITION struct{
+	// Based on informatiom from: https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-2000-server/cc976796(v=technet.10)?redirectedfrom=MSDN
+	jumpinstruction [3]byte
+	oemID [8]byte
+	bytesPerSector uint16			//Start of Bios Parameter Block (BPB)
+	sectorPerCluster uint8
+	reservedSectors [2]byte
+	alwaysZero [3]byte
+	unused [2]byte
+	mediaDescription [1]byte
+	alsoAlwaysZero [2]byte
+	sectorsPerTrack [2]byte
+	numberOfHeads [2]byte
+	hiddenSectors [4]byte
+	unusedTwo [4]byte
+	unusedThree [4]byte				//Start of Extended BPB
+	totalSectors [8]byte
+	MFTOffset uint32
+	MFTMirrorOffset [8]byte
+	clusterPerFileRecord [4]byte
+	clusterPerIndexBlock [4]byte
+	volumeSerialNumber [8]byte
+	checksum [4]byte				// End EBPB
+	bootstrapCode [426]byte
+	endOfSectionMarker [2]byte
+}
+
+type MFT_ENTRY struct{
+	// Based on information from: https://flatcap.github.io/linux-ntfs/ntfs/concepts/file_record.html
+	magicNumber [4]byte
+	offsetToUpdate [2]byte
+	sizeInWordsOfUpdateSequence [2]byte
+	logFileSequenceNumber [8]byte
+	sequenceNumber [2]byte
+	hardLinkCounter [2]byte
+	offsetToFirstAttribute [2]byte
+	flags [2]byte
+	sizeRecord [4]byte
+	allocatedSizeRecord [4]byte
+	fileReference [8]byte
+	nextAttributeID [2]byte
+	XPONLY_boundary [2]byte
+	XPONLY_RecordNumber [4]byte
+	attributes[]byte
+}
+
+type MFT_ENTRY_ATTRIBUTE struct{
+	// Based on information from: http://inform.pucp.edu.pe/~inf232/Ntfs/ntfs_doc_v0.5/concepts/attribute_header.html
+	// Default one: non-resident, no-name (NRNN)
+	attributeType [4]byte
+	length [4]byte
+	nonResidentFlag [1]byte
+	nameLenght [1]byte
+	nameOffset [2]byte
+	flags [2]byte
+	attributeID [2]byte
+	attributeLenght [4]byte
+	offsetToAttribute [2]byte
+	indexFlag [1]byte
+	padding [1]byte
+	AttributeName []byte	
+}
+
+type DATA_RUN struct{
+	nimble uint8
+	clusterCountLength int
+	clusterOffsetLength int
+	clusterCount int64
+	absoluteOffsetWithinNTFSPartition int64
+}
+
+type FILE_INFO struct{
+	recordID uint32
+	isFolder bool
+	isActive bool
+	fileName string
+	fileCreatedUTCWinFileEpoch uint32
+	fileModifiedUTCWinFileEpoch uint32
+	fileRecordModifiedUTCWinFileEpoch uint32
+	fileLastReadUTCWinFileEpoch uint32
+	filePermissionFlag uint32
+	fileOwnerID uint16
+	parentDirectory uint32
+	dataLength uint32
+	fullDataOffset uint64	//This should include the NTFS offset as well!
+}
+
+// *** Supporting functions
+func boolToInt(value bool) int{
+	var returnValue = 0
+	if(value){
+		returnValue = 1
+	}
+	if(!value){
+		returnValue = 0
+	}
+	return returnValue
+}
+
+func isEmptyBuffer(s []byte) bool {
+    for _, v := range s {
+        if v != 0 {
+            return false
+        }
+    }
+    return true
+}
+
+func parseNimble(nimble uint8) (int, int){
+	var clusterCountLength int
+	var clusterOffsetLength int
+	slidedHexStringNimble := strings.Split(strconv.FormatInt(int64(nimble), 16),"")
+	clusterCountLength,_ = strconv.Atoi(slidedHexStringNimble[1])
+	clusterOffsetLength,_ = strconv.Atoi(slidedHexStringNimble[0])
+	return clusterCountLength, clusterOffsetLength
+}
+
+func calculateHexComplement(input string) (string){
+	returnString := ""
+	oppositesMap := make(map[string]string)
+	oppositesMap["0"] = "f"
+	oppositesMap["1"] = "e"
+	oppositesMap["2"] = "d"
+	oppositesMap["3"] = "c"
+	oppositesMap["4"] = "b"
+	oppositesMap["5"] = "a"
+	oppositesMap["6"] = "9"
+	oppositesMap["7"] = "8"
+	oppositesMap["8"] = "7"
+	oppositesMap["9"] = "6"
+	oppositesMap["a"] = "5"
+	oppositesMap["b"] = "4"
+	oppositesMap["c"] = "3"
+	oppositesMap["d"] = "2"
+	oppositesMap["e"] = "1"
+	oppositesMap["f"] = "0"
+	
+	for counter, _ := range input{
+		returnString = returnString + oppositesMap[string(input[counter])]
+	}
+	return returnString
+}
+
+func interPreteMFTRecordFlag(flag uint16)(bool,bool){
+	// https://flatcap.github.io/linux-ntfs/ntfs/concepts/file_record.html
+	isFolder := false
+	isActive := false //e.g. file is deleted
+	
+	if flag >= 8{
+		// Special index flag, not relevant for this implementation
+		flag = flag - 8
+	}
+	if flag >= 4{
+		// Extension flag, not relevant to this implementation
+		flag = flag - 4
+	}
+	if flag >= 2{
+		flag = flag - 2
+		isFolder = true
+	}
+	if flag >= 1{
+		isActive = true
+	}
+	return isFolder, isActive
+}
+
+func convertClusterOffsetHexFromDatarunToDecimalOffset(offsetLength int, buffer []byte, offsetToMFTBlockOffsetInHex int) (int64){
+	var returnOffset int64
+	var offsetAsString string
+	
+	if((offsetLength) > 3){
+				// If the first byte starts with a zero, we need to remove that zero, and add it to the end of the byte
+				offsetAsString = offsetAsString + fmt.Sprintf("%x",buffer[offsetToMFTBlockOffsetInHex+3:offsetToMFTBlockOffsetInHex+4][0])
+	}
+	offsetAsString = offsetAsString + fmt.Sprintf("%x",buffer[offsetToMFTBlockOffsetInHex+2:offsetToMFTBlockOffsetInHex+3])
+	offsetAsString = offsetAsString + fmt.Sprintf("%x",buffer[offsetToMFTBlockOffsetInHex+1:offsetToMFTBlockOffsetInHex+2])
+	offsetAsString = offsetAsString + fmt.Sprintf("%x",buffer[offsetToMFTBlockOffsetInHex:offsetToMFTBlockOffsetInHex+1])
+	offsetAsString = offsetAsString + "000"
+	returnOffset,_ = strconv.ParseInt(offsetAsString, 16, 64)
+	
+	// Checking if the hex value represents a signed integer: https://www.d.umn.edu/~gshute/asm/signed.xhtml / https://github.com/libyal/libfsntfs/blob/main/documentation/New%20Technologies%20File%20System%20(NTFS).asciidoc
+	// 1. get MSB of first Hex value, 2. (if signed, > 7, calculate the complement and add 1, transpose to decimal and add minus symbol)
+	if( offsetAsString[0] > 64){
+		// Calculate offset Complement
+		complementHex := calculateHexComplement(offsetAsString)
+		returnOffset,_ = strconv.ParseInt(complementHex, 16, 64)
+		returnOffset = (-1)*(returnOffset+1)
+	}
+	return returnOffset
+}
+
+func getFilenameAsString(fileNameLength uint8, offset uint8, attribute []byte)(string){	
+	fileName := ""
+	fileNameLength2 := fileNameLength*2
+	start := offset + 66
+	stop := uint16(start) + uint16(fileNameLength2)
+	fileNameWithZeros := attribute[start:stop]
+				
+	for _, character := range fileNameWithZeros{
+		if character != 0{
+			fileName = fileName + string(character)
+		}
+	}
+	return fileName
+}
+
+func iterateMFT(driveLocation string, mftBlockOffset uint64, recordSize int64, ignoreRecords int, NTFSOffset uint32, clusterSize uint32, outputMode int) int{
+	// Note that the first 26 records are reserved for system specific purposes: http://ntfs.com/ntfs-system-files.htm
+	// But this only holds for the first block
+	handle, error := os.Open(driveLocation)
+	fileIndicator := [4]byte{70, 73, 76, 69}		// Note, this spells out FILE, based on the decimal values for the corresponding character in the ASCII table.
+	var tmpMagicNumber [4]byte
+	recordCounter := int64(ignoreRecords)			// the firest 26 contain some unsued ones, will mess up the loop.
+	if(error == nil){
+		// Initialize first record
+		recordOffset := int64(mftBlockOffset) + int64((recordCounter * recordSize))
+		mftRecordBuffer := make([]byte, recordSize)
+		handle.Seek(recordOffset,0)		
+		handle.Read(mftRecordBuffer)
+		binary.Read(bytes.NewBuffer(mftRecordBuffer[0:4]), binary.LittleEndian, &tmpMagicNumber)
+
+		for(tmpMagicNumber == fileIndicator){
+			// Load next record
+			recordCounter +=1
+			recordOffset := int64(mftBlockOffset) + int64((recordCounter * recordSize))
+			handle.Seek(recordOffset,0)
+			handle.Read(mftRecordBuffer)
+			parseMFTRecord(mftRecordBuffer, recordOffset, NTFSOffset, clusterSize, outputMode)
+			binary.Read(bytes.NewBuffer(mftRecordBuffer[0:4]), binary.LittleEndian, &tmpMagicNumber)
+		}
+	}
+	handle.Close()
+	return int(recordCounter)
+}
+
+func getNumber(input []byte) int64{
+	var returnNumber int64
+	var offsetAsString string
+	
+	if(len(input) > 4){
+		fmt.Println("Error: out of range")
+	}
+	if(len(input) == 4){
+		offsetAsString = offsetAsString + fmt.Sprintf("%x",input[3])
+		offsetAsString = offsetAsString + fmt.Sprintf("%x",input[2])
+		offsetAsString = offsetAsString + fmt.Sprintf("%x",input[1])
+		offsetAsString = offsetAsString + fmt.Sprintf("%x",input[0])		
+	}
+	if(len(input) == 3){
+		offsetAsString = offsetAsString + fmt.Sprintf("%x",input[2])
+		offsetAsString = offsetAsString + fmt.Sprintf("%x",input[1])
+		offsetAsString = offsetAsString + fmt.Sprintf("%x",input[0])		
+	}
+	
+	if(len(input)==2){
+		offsetAsString = offsetAsString + fmt.Sprintf("%x",input[1])
+		offsetAsString = offsetAsString + fmt.Sprintf("%x",input[0])			
+	}
+	
+	if(len(input)==1){
+		offsetAsString = offsetAsString + fmt.Sprintf("%x",input[0])			
+	}
+	returnNumber,_ = strconv.ParseInt(offsetAsString, 16, 64)
+	return returnNumber
+}
+
+// *** Validators and identifier functions
+func identifyBasicPartition(partitionArray []PARTITIONENTRY, basicPartionGUID [16]byte) (bool, int){
+	for partitionNumber, partition := range partitionArray{
+		if partition.partitionGUID == basicPartionGUID{
+			return true, partitionNumber
+		}
+	}
+	return false,0
+}
+
+// *** Parsers
+func parseGPTHeader(driveLocation string, logicalBlockAddressSize int64, LBAOffset int64) GPTHEADER{
+	var gptheader GPTHEADER
+	handle, error := os.Open(driveLocation)
+	if(error == nil){
+		gptBuffer := make([]byte, logicalBlockAddressSize)
+		handle.Seek(logicalBlockAddressSize*LBAOffset,0)		
+		handle.Read(gptBuffer)
+		
+		// Parse the buffer to GPT header
+		binary.Read(bytes.NewBuffer(gptBuffer[0:8]), binary.LittleEndian, &gptheader.signature)
+		binary.Read(bytes.NewBuffer(gptBuffer[8:12]), binary.LittleEndian, &gptheader.revision)
+		binary.Read(bytes.NewBuffer(gptBuffer[12:16]), binary.LittleEndian, &gptheader.headerSize)
+		binary.Read(bytes.NewBuffer(gptBuffer[16:20]), binary.LittleEndian, &gptheader.crc32)
+		binary.Read(bytes.NewBuffer(gptBuffer[20:24]), binary.LittleEndian, &gptheader.reserved)
+		binary.Read(bytes.NewBuffer(gptBuffer[24:32]), binary.LittleEndian, &gptheader.currentLBA)
+		binary.Read(bytes.NewBuffer(gptBuffer[32:40]), binary.LittleEndian, &gptheader.backupLBA)
+		binary.Read(bytes.NewBuffer(gptBuffer[40:48]), binary.LittleEndian, &gptheader.firstLBA)
+		binary.Read(bytes.NewBuffer(gptBuffer[48:56]), binary.LittleEndian, &gptheader.lastLBA)
+		binary.Read(bytes.NewBuffer(gptBuffer[56:72]), binary.LittleEndian, &gptheader.diskGUID)
+		binary.Read(bytes.NewBuffer(gptBuffer[72:80]), binary.LittleEndian, &gptheader.partitionEntriesLBA)
+		binary.Read(bytes.NewBuffer(gptBuffer[80:84]), binary.LittleEndian, &gptheader.numberOfPartitions)
+		binary.Read(bytes.NewBuffer(gptBuffer[84:88]), binary.LittleEndian, &gptheader.partitionEntrySize)
+		binary.Read(bytes.NewBuffer(gptBuffer[88:92]), binary.LittleEndian, &gptheader.crc32PartitionEntry)
+	}
+	handle.Close()
+	return gptheader
+}
+
+func parsePartition(partitionBuffer []byte)PARTITIONENTRY{
+	var partitionEntry PARTITIONENTRY
+	
+	binary.Read(bytes.NewBuffer(partitionBuffer[0:16]), binary.LittleEndian, &partitionEntry.partitionGUID)
+	binary.Read(bytes.NewBuffer(partitionBuffer[16:32]), binary.LittleEndian, &partitionEntry.uniquePartitionGUID)
+	binary.Read(bytes.NewBuffer(partitionBuffer[32:40]), binary.LittleEndian, &partitionEntry.startingLBA)
+	binary.Read(bytes.NewBuffer(partitionBuffer[40:48]), binary.LittleEndian, &partitionEntry.endingLBA)
+	binary.Read(bytes.NewBuffer(partitionBuffer[48:56]), binary.LittleEndian, &partitionEntry.attributes)
+	binary.Read(bytes.NewBuffer(partitionBuffer[56:128]), binary.LittleEndian, &partitionEntry.partitionName)
+	
+	return partitionEntry
+}
+
+func parsePartitions(driveLocation string, partitionTableOffset uint32, partitionTableEntrySize uint32, partitionTableEntries uint32) (int, []PARTITIONENTRY){
+	partitionsFound := 0
+	var partitionArray []PARTITIONENTRY
+	handle, error := os.Open(driveLocation)
+	if(error == nil){
+		partitionTableBuffer := make([]byte, partitionTableEntries * partitionTableEntrySize)
+		handle.Seek(int64(partitionTableOffset),0)		
+		handle.Read(partitionTableBuffer)
+		for i := uint32(0); i < partitionTableEntries; i++ {
+			partitionEntry := partitionTableBuffer[i*partitionTableEntrySize:(i+1)*partitionTableEntrySize]
+			if!(isEmptyBuffer(partitionEntry)){
+				partitionArray = append(partitionArray, parsePartition(partitionEntry))
+				partitionsFound++
+			}
+		}
+	}
+	handle.Close()
+	return partitionsFound, partitionArray
+}
+
+func parseNTFSHeader(driveLocation string, NTFSHeaderOffset uint32, NTFSHeaderSize uint32) NTFS_BOOT_PARTITION{
+	var ntfsHeader NTFS_BOOT_PARTITION
+	handle, error := os.Open(driveLocation)
+	if(error == nil){
+		ntfsHeaderBuffer := make([]byte, NTFSHeaderSize)
+		handle.Seek(int64(NTFSHeaderOffset),0)		
+		handle.Read(ntfsHeaderBuffer)
+		// Parsing start of NTFS_block
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[0:3]), binary.LittleEndian, &ntfsHeader.jumpinstruction)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[3:11]), binary.LittleEndian, &ntfsHeader.oemID)
+		// Parsing Bios Parameter Block (25 bytes)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[11:13]), binary.LittleEndian, &ntfsHeader.bytesPerSector)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[13:14]), binary.LittleEndian, &ntfsHeader.sectorPerCluster)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[14:16]), binary.LittleEndian, &ntfsHeader.reservedSectors)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[16:19]), binary.LittleEndian, &ntfsHeader.alwaysZero)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[19:21]), binary.LittleEndian, &ntfsHeader.unused)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[21:22]), binary.LittleEndian, &ntfsHeader.mediaDescription)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[22:24]), binary.LittleEndian, &ntfsHeader.alsoAlwaysZero)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[24:26]), binary.LittleEndian, &ntfsHeader.sectorsPerTrack)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[26:28]), binary.LittleEndian, &ntfsHeader.numberOfHeads)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[28:32]), binary.LittleEndian, &ntfsHeader.hiddenSectors)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[32:36]), binary.LittleEndian, &ntfsHeader.unusedTwo)
+		// Parsing Extended Bios Parameter Block (48 bytes)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[36:40]), binary.LittleEndian, &ntfsHeader.unusedThree)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[40:48]), binary.LittleEndian, &ntfsHeader.totalSectors)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[48:56]), binary.LittleEndian, &ntfsHeader.MFTOffset)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[56:64]), binary.LittleEndian, &ntfsHeader.MFTMirrorOffset)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[64:68]), binary.LittleEndian, &ntfsHeader.clusterPerFileRecord)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[68:72]), binary.LittleEndian, &ntfsHeader.clusterPerIndexBlock)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[72:80]), binary.LittleEndian, &ntfsHeader.volumeSerialNumber)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[80:84]), binary.LittleEndian, &ntfsHeader.checksum)
+		// Parsing start of NTFS_block
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[84:510]), binary.LittleEndian, &ntfsHeader.bootstrapCode)
+		binary.Read(bytes.NewBuffer(ntfsHeaderBuffer[510:512]), binary.LittleEndian, &ntfsHeader.endOfSectionMarker)
+		// done parsing :)
+	}
+	handle.Close()
+	return ntfsHeader
+}
+
+func parseMFTEntry(mftRecordBuffer []byte) MFT_ENTRY{
+	var mftEntry MFT_ENTRY
+	
+	binary.Read(bytes.NewBuffer(mftRecordBuffer[0:4]), binary.LittleEndian, &mftEntry.magicNumber)
+	binary.Read(bytes.NewBuffer(mftRecordBuffer[4:6]), binary.LittleEndian, &mftEntry.offsetToUpdate)
+	binary.Read(bytes.NewBuffer(mftRecordBuffer[6:8]), binary.LittleEndian, &mftEntry.sizeInWordsOfUpdateSequence)
+	binary.Read(bytes.NewBuffer(mftRecordBuffer[8:16]), binary.LittleEndian, &mftEntry.logFileSequenceNumber)
+	binary.Read(bytes.NewBuffer(mftRecordBuffer[16:18]), binary.LittleEndian, &mftEntry.sequenceNumber)
+	binary.Read(bytes.NewBuffer(mftRecordBuffer[18:20]), binary.LittleEndian, &mftEntry.hardLinkCounter)
+	binary.Read(bytes.NewBuffer(mftRecordBuffer[20:22]), binary.LittleEndian, &mftEntry.offsetToFirstAttribute)
+	binary.Read(bytes.NewBuffer(mftRecordBuffer[22:24]), binary.LittleEndian, &mftEntry.flags)
+	binary.Read(bytes.NewBuffer(mftRecordBuffer[24:28]), binary.LittleEndian, &mftEntry.sizeRecord)
+	binary.Read(bytes.NewBuffer(mftRecordBuffer[28:32]), binary.LittleEndian, &mftEntry.allocatedSizeRecord)
+	binary.Read(bytes.NewBuffer(mftRecordBuffer[32:40]), binary.LittleEndian, &mftEntry.fileReference)
+	binary.Read(bytes.NewBuffer(mftRecordBuffer[40:42]), binary.LittleEndian, &mftEntry.nextAttributeID)
+	binary.Read(bytes.NewBuffer(mftRecordBuffer[42:44]), binary.LittleEndian, &mftEntry.XPONLY_boundary)
+	binary.Read(bytes.NewBuffer(mftRecordBuffer[44:48]), binary.LittleEndian, &mftEntry.XPONLY_RecordNumber)
+	
+	return mftEntry
+}
+
+func getMFTOffsetLocationsFromMFT(driveLocation string, MFTOffset uint32, recordSize int64, NTFSOffset uint32)[]int{
+	// This function parses the $DATA entry of the $MFT file, to find all MFT blocks and zones
+	// No need to parse the full record, this will be done through a more systematic iterator.
+	// Flag indicating $DATA attribute = 0x80 https://learn.microsoft.com/en-us/windows/win32/devnotes/attribute-list-entry,
+	handle, error := os.Open(driveLocation)
+	dataType := uint16(128)	// Searching for attribute of type 0x80, e.g. 128 in dec
+	var mftClusterOffsets []int
+
+	if(error == nil){
+		mftRecordBuffer := make([]byte, recordSize)
+		handle.Seek(int64(MFTOffset),0)		
+		handle.Read(mftRecordBuffer)
+
+		var offsetToAttribute uint16
+		var attributeType uint16
+		var attributeLength uint16
+		
+		binary.Read(bytes.NewBuffer(mftRecordBuffer[20:22]), binary.LittleEndian, &offsetToAttribute)
+		binary.Read(bytes.NewBuffer(mftRecordBuffer[offsetToAttribute:offsetToAttribute+4]), binary.LittleEndian, &attributeType)
+		binary.Read(bytes.NewBuffer(mftRecordBuffer[offsetToAttribute+4:offsetToAttribute+4+4]), binary.LittleEndian, &attributeLength)
+		
+		// This only works because we are certain that $MFT actually has the $DATA attribute
+		for(attributeType != dataType){
+			offsetToAttribute = offsetToAttribute + attributeLength
+			binary.Read(bytes.NewBuffer(mftRecordBuffer[offsetToAttribute:offsetToAttribute+4]), binary.LittleEndian, &attributeType)
+			binary.Read(bytes.NewBuffer(mftRecordBuffer[offsetToAttribute+4:offsetToAttribute+4+4]), binary.LittleEndian, &attributeLength)
+		}
+		fmt.Printf("  --> $DATA attribute of $MFT found at record offset: %d\n", offsetToAttribute)
+		// The name of the Attribute is $DATA, the offset is stored in the header on the 10th to twelfth byte. Hence the data runs start at attributes offset + name offset
+		
+		var offsetToDATAAttribute uint16
+		var dataAttributeLenght uint16
+		var dataRunOffset uint16
+		fullDiskMFTBlockOffset := int64(NTFSOffset)
+		binary.Read(bytes.NewBuffer(mftRecordBuffer[offsetToAttribute+4:offsetToAttribute+8]), binary.LittleEndian, &dataAttributeLenght)
+		binary.Read(bytes.NewBuffer(mftRecordBuffer[offsetToAttribute+10:offsetToAttribute+12]), binary.LittleEndian, &offsetToDATAAttribute)
+		dataRunCounter := int(dataAttributeLenght) - int(offsetToDATAAttribute)
+		dataRunOffset = offsetToAttribute + offsetToDATAAttribute
+
+		// Post condition for looping through the data runs
+		//because attribute types are assending, and the first byte of the attribute header contains a type, we can assume that we are past our data runs if the nimble exceeds 0x44 (68) or is just 0
+		for (dataRunCounter > 3){
+			var dataRun DATA_RUN
+			// To save space, the dataRun varies in space, the only thing we know for sure is that the length is the first byte: http://inform.pucp.edu.pe/~inf232/Ntfs/ntfs_doc_v0.5/concepts/data_runs.html
+			binary.Read(bytes.NewBuffer(mftRecordBuffer[dataRunOffset:dataRunOffset+1]), binary.LittleEndian, &dataRun.nimble)
+			dataRun.clusterCountLength, dataRun.clusterOffsetLength = parseNimble(dataRun.nimble)
+			clusterStart := int(dataRunOffset) + 1 + dataRun.clusterCountLength
+
+			// **************** Welcome to casting, converting and formatting hell! **************** 
+			offsetToMFTBlock := convertClusterOffsetHexFromDatarunToDecimalOffset(dataRun.clusterOffsetLength, mftRecordBuffer, clusterStart)
+			
+			// Fix the offsets to the next datarun
+			dataRunOffset = dataRunOffset + 1 + uint16(dataRun.clusterCountLength) + uint16(dataRun.clusterOffsetLength)	//need + 1 as this indicates the length byte
+			dataRunCounter = int(dataRunCounter) - 1 - dataRun.clusterCountLength - dataRun.clusterOffsetLength
+			
+			//To get to the right offset, we need to add the offset from the previous data run 
+			fullDiskMFTBlockOffset = int64(fullDiskMFTBlockOffset) + int64(offsetToMFTBlock)
+			mftClusterOffsets = append(mftClusterOffsets, int(fullDiskMFTBlockOffset))
+		}
+
+	}
+	handle.Close()
+	return mftClusterOffsets
+}
+
+func parseMFTRecord(recordBuffer []byte, recordOffset int64, NTFSOffset uint32, clusterSize uint32, outputMode int){
+	fileIndicator := [4]byte{70, 73, 76, 69}	// The numbers correspond to the FILE characters
+	var tmpMagicNumber [4]byte
+	binary.Read(bytes.NewBuffer(recordBuffer[0:4]), binary.LittleEndian, &tmpMagicNumber)
+	
+	if(tmpMagicNumber == fileIndicator){
+		var fileInformation FILE_INFO
+		
+		var offsetToAttribute uint16
+		var fileRecordFlag uint16
+		var sizeOfRecord uint32
+		var checkEndMarker uint32
+		
+		endMarker := uint32(4294967295)	// the filerecord ends with end marker: 0xFFFFFFFF (e.g. 4294967295 in dec)
+		// Default attribute information: https://flatcap.github.io/linux-ntfs/ntfs/concepts/attribute_header.html
+		binary.Read(bytes.NewBuffer(recordBuffer[20:22]), binary.LittleEndian, &offsetToAttribute)		// This usually becomes 0x38 or 56 for the first attribute
+		binary.Read(bytes.NewBuffer(recordBuffer[22:24]), binary.LittleEndian, &fileRecordFlag)
+		binary.Read(bytes.NewBuffer(recordBuffer[24:28]), binary.LittleEndian, &sizeOfRecord)
+		binary.Read(bytes.NewBuffer(recordBuffer[44:48]), binary.LittleEndian, &fileInformation.recordID)
+
+		fileInformation.isFolder, fileInformation.isActive = interPreteMFTRecordFlag(fileRecordFlag)
+
+		// The first 4 bytes of an attribute are the attribute type, the second 4 bytes are the attribute length		
+		for(checkEndMarker != endMarker){
+			var attributeType uint16
+			var attributeLength uint16
+			binary.Read(bytes.NewBuffer(recordBuffer[offsetToAttribute:offsetToAttribute +4]), binary.LittleEndian, &attributeType)
+			binary.Read(bytes.NewBuffer(recordBuffer[offsetToAttribute+4:offsetToAttribute +8]), binary.LittleEndian, &attributeLength)
+			// If there are no attributes, you will read FFFF or 65535 as attribute type (which is the end marker)
+			if(attributeType != 65535){
+				// Check for our attributes, we want $DATA (0x80 or 128) and $FILE_NAME (0x30 or 48)
+				// Full list for anybody that wants to complete this implementation: https://learn.microsoft.com/en-us/windows/win32/devnotes/attribute-list-entry
+				attribute := recordBuffer[offsetToAttribute:(offsetToAttribute + attributeLength)]
+				// attribute 0x10 contains the Standard information, which is kept up to date: https://flatcap.github.io/linux-ntfs/ntfs/attributes/file_name.html
+				if(attributeType == 16){
+					var ofssetToAttributeData uint8		
+					binary.Read(bytes.NewBuffer(attribute[20:22]), binary.LittleEndian, &ofssetToAttributeData)
+				
+					// To do: implement time conversaion: https://pkg.go.dev/google.golang.org/protobuf/types/known/timestamppb
+					binary.Read(bytes.NewBuffer(attribute[ofssetToAttributeData:ofssetToAttributeData + 8]), binary.LittleEndian, &fileInformation.fileCreatedUTCWinFileEpoch)
+					binary.Read(bytes.NewBuffer(attribute[ofssetToAttributeData + 8:ofssetToAttributeData + 16]), binary.LittleEndian, &fileInformation.fileModifiedUTCWinFileEpoch)
+					binary.Read(bytes.NewBuffer(attribute[ofssetToAttributeData + 16:ofssetToAttributeData + 24]), binary.LittleEndian, &fileInformation.fileRecordModifiedUTCWinFileEpoch)
+					binary.Read(bytes.NewBuffer(attribute[ofssetToAttributeData + 24:ofssetToAttributeData + 32]), binary.LittleEndian, &fileInformation.fileLastReadUTCWinFileEpoch)
+				
+					// To do: write parser for flag to optimize DB queriying for insecure permission combinations
+					binary.Read(bytes.NewBuffer(attribute[ofssetToAttributeData + 32:ofssetToAttributeData + 40]), binary.LittleEndian, &fileInformation.filePermissionFlag)
+					binary.Read(bytes.NewBuffer(attribute[ofssetToAttributeData + 48:ofssetToAttributeData + 52]), binary.LittleEndian, &fileInformation.fileOwnerID)
+				}
+			
+				// attribute 0x30 contains the information attribute, including the filename
+				if(attributeType == 48){
+					var ofssetToAttributeData uint8		
+					var fileNameLength uint8		
+				
+					binary.Read(bytes.NewBuffer(attribute[20:22]), binary.LittleEndian, &ofssetToAttributeData)
+					binary.Read(bytes.NewBuffer(attribute[ofssetToAttributeData:ofssetToAttributeData + 6]), binary.LittleEndian, &fileInformation.parentDirectory)
+					binary.Read(bytes.NewBuffer(attribute[ofssetToAttributeData +64:ofssetToAttributeData + 65]), binary.LittleEndian, &fileNameLength)
+					fileInformation.fileName = getFilenameAsString(fileNameLength, ofssetToAttributeData, attribute)
+				}
+			
+				// attribute 0x80 contains the data offset, more information about the data attributes: https://sabercomlogica.com/en/ntfs-non-resident-and-no-named-attributes/
+				if(attributeType == 128){
+					// Some limitations, a file record can have multiple $DATA sections. Additionally, a non-resident data record, can have multiple data runs.
+					var noneResidentFlag uint8
+					var ofssetToAttributeData uint16
+					binary.Read(bytes.NewBuffer(attribute[8:9]), binary.LittleEndian, &noneResidentFlag)
+
+					// Data in file record
+					if noneResidentFlag == 0{
+						binary.Read(bytes.NewBuffer(attribute[16:20]), binary.LittleEndian, &fileInformation.dataLength)
+						binary.Read(bytes.NewBuffer(attribute[20:22]), binary.LittleEndian, &ofssetToAttributeData)
+						// To do calculate this back, to get absolute offset (note that the record offset, also includes the NTFS offset)
+						fileInformation.fullDataOffset = uint64(offsetToAttribute) + uint64(ofssetToAttributeData) + uint64(recordOffset)
+					}
+				
+					// Data outside
+					if noneResidentFlag == 1{
+						binary.Read(bytes.NewBuffer(attribute[48:56]), binary.LittleEndian, &fileInformation.dataLength)
+						binary.Read(bytes.NewBuffer(attribute[32:34]), binary.LittleEndian, &ofssetToAttributeData)
+						// Bold move, i'm not going to care for large files with multiple data runs, if you need those, make your own implementation :)
+						// To save space, the dataRun varies in space, the only thing we know for sure is that the length is the first byte: http://inform.pucp.edu.pe/~inf232/Ntfs/ntfs_doc_v0.5/concepts/data_runs.html
+						// In some exceptional cases $REPAIR file, a data offset is specified, however, the datarun is empty as repair might not be configured
+						// To deal with this, check if ofssetToAttributeData doesn't overflow the attribute array, in case it does, lets ignore this.
+					
+						if (int(ofssetToAttributeData) + 1) >= len(attribute){
+							fmt.Println("Exceptional case where $DATA is empty, ignoring this entry")
+						}	
+					
+						if (int(ofssetToAttributeData) + 1) < len(attribute){
+							var dataRun DATA_RUN
+							binary.Read(bytes.NewBuffer(attribute[ofssetToAttributeData:ofssetToAttributeData+1]), binary.LittleEndian, &dataRun.nimble)
+							// Weird exception case, where there is no data at all or we encounter a sparce / compressed data run
+							// A nimble should have 2 values and shoulnd't be 0, hence comparing if larger than 9
+							if(dataRun.nimble >= 9){
+								dataRun.clusterCountLength, dataRun.clusterOffsetLength = parseNimble(dataRun.nimble)
+	
+								tmpStartOffset := ofssetToAttributeData+1+ uint16(dataRun.clusterCountLength)
+								tmpStopOffset := ofssetToAttributeData+1+uint16(dataRun.clusterCountLength)+uint16(dataRun.clusterOffsetLength)
+								fileInformation.fullDataOffset =  uint64(NTFSOffset) + (uint64(clusterSize) * uint64(getNumber(attribute[tmpStartOffset:tmpStopOffset])))
+							}
+						}
+					}				
+				}
+				// Updating attribute offset and making sure we can iterateMFT
+				offsetToAttribute = offsetToAttribute + attributeLength				
+			}
+			binary.Read(bytes.NewBuffer(recordBuffer[offsetToAttribute:offsetToAttribute +4]), binary.LittleEndian, &checkEndMarker)
+		}
+		processFileRecord(fileInformation, outputMode)
+	}
+}
+
+/* Output modus: 1 = Dump to screen, 2=Create SQL DB*/
+func processFileRecord(fileInformation FILE_INFO, outputMode int){
+	if(outputMode == 1){
+		fmt.Printf("Finished Filename: %s. \n isActive: %t \n isFolder: %t \nStarting at: %d with size: %d\nParent directory: :d", fileInformation.fileName, fileInformation.isActive, fileInformation.isFolder,fileInformation.fullDataOffset,fileInformation.dataLength, fileInformation.parentDirectory)
+	}
+	if(outputMode == 2){
+		insertFileRecord(int(fileInformation.recordID), fileInformation.fileName, int(fileInformation.parentDirectory), boolToInt(fileInformation.isFolder), boolToInt(fileInformation.isActive), int(fileInformation.fullDataOffset), int(fileInformation.dataLength))
+	}
+}
+
+/* Database functionality */
+func setUpSQLiteDB(dbFile string){
+	os.Remove(dbFile)	//ensure to start with a clean slave
+	database, _ = sql.Open("sqlite3", dbFile)
+	//defer database.Close()
+	database.Exec("CREATE TABLE files (FID INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, RID Integer, parentID INTEGER, filename TEXT, fileOffset INTEGER, fileLength INTEGER, isFolder INTEGER, isActive INTEGER)")
+	fmt.Println("[+] Database setup and ready to get populated")
+}
+
+
+/* Dump functionality */
+func dumpToFile(deviceLocation string, offset int, length int, outputFile string){
+	fmt.Println("[+] Dumping file with offset: ", offset, " length: ", length, " into file: ", outputFile)
+	physicalDiskHandle, _ := os.Open(deviceLocation)
+	// Note: buffer needs to be a multiple of 512 to work.
+	
+	buffer := make([]byte, int64(length))
+	physicalDiskHandle.Seek(int64(offset),0)
+	physicalDiskHandle.Read(buffer)
+	os.WriteFile(outputFile, buffer, 0644)
+	physicalDiskHandle.Close()
+}
+
+func insertFileRecord(RID int, filename string, parentID int, isFolder int, isActive int, fullOffset int, dataLength int){
+	insertCounter = insertCounter + 1
+	if((insertCounter % 10000) == 0){
+		fmt.Println("Processed 10K files, total added: ", insertCounter)
+	}
+	_, err := database.Exec("INSERT INTO files (RID, parentID, filename, fileOffset, fileLength, isFolder, isActive) VALUES (?,?, ?, ?,?,?,?)", RID, parentID, filename, fullOffset, dataLength, isFolder, isActive)
+	if(err != nil){
+		fmt.Println(err)
+	}
+}
+
+/* Program functionality */
+func dumpMFT(deviceLocation string, dumpMode int){
+	const logicalBlockAddressSize = 512
+	const GPTLBA = 1									//we need the first LBA, LBA0 is legacy	
+	
+	// Typical GUIDs: https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ns-winioctl-partition_information_gpt
+	// We are searching for: ebd0a0a2-b9e5-4433-87c0-68b6b72699c7
+	NTFSSearchGUID := [16]byte{162, 160, 208, 235, 229, 185, 51, 68, 135, 192, 104, 182, 183, 38, 153, 199} 
+	NTFSOEMIndicator := [8]byte{78, 84, 70, 83, 32, 32, 32, 32}
+	const NTFSBootSectorSize = 512
+	const recordSize = 1024
+	totalRecords := 0
+	
+	fmt.Println("[+] Parsing GPT Header")
+	gptheader := parseGPTHeader(deviceLocation, logicalBlockAddressSize, GPTLBA)				
+	fmt.Printf("[+] Calculating buffer size for DISK with signature % x", gptheader.signature)
+	partitionTableOffset := gptheader.partitionEntriesLBA * logicalBlockAddressSize
+	fmt.Printf("\n  --> Starting at LBA: %d means a seek offset of: %d", gptheader.partitionEntriesLBA, partitionTableOffset)
+	fmt.Printf("\n  --> With %d partitions, of size: %d, we need a buffer of: %d", gptheader.numberOfPartitions, gptheader.partitionEntrySize, gptheader.numberOfPartitions * gptheader.partitionEntrySize)
+	fmt.Println("\n[+] Parsing Partition table")
+	numberOfPartitions, partitions := parsePartitions(deviceLocation, partitionTableOffset, gptheader.partitionEntrySize, gptheader.numberOfPartitions)
+	fmt.Printf("  --> Number of partitions identified: %d",numberOfPartitions)
+	fmt.Println("\n[+] Determining windows Base partition / NTFS partition")
+	basicPartitionFound, partNumber := identifyBasicPartition(partitions, NTFSSearchGUID)
+	if(basicPartitionFound){
+		NTFSOffset := logicalBlockAddressSize * partitions[partNumber].startingLBA
+		fmt.Printf("  --> Found basic partition starting at offset: %d",NTFSOffset)
+		fmt.Println("\n[+] Parsing NTFS header")
+		ntfsHeader := parseNTFSHeader(deviceLocation,NTFSOffset, NTFSBootSectorSize)
+		if(ntfsHeader.oemID == NTFSOEMIndicator){
+			fmt.Println("  --> Validated basic partition to be NTFS by comparing oemID")
+			fmt.Printf("  --> Using BytesPerSector: %d, SectorsPerCluster: %d\n",ntfsHeader.bytesPerSector, ntfsHeader.sectorPerCluster)
+			clusterSize := uint32(ntfsHeader.bytesPerSector)*uint32(ntfsHeader.sectorPerCluster)
+			MFTOffset := NTFSOffset + ntfsHeader.MFTOffset*clusterSize
+			fmt.Printf("  --> Master File Table ($MFT) offset found at: %d, e.g. a total offset of: %d", ntfsHeader.MFTOffset, MFTOffset)
+			fmt.Printf("\n  --> $MFT offset - NFTSoffset (as used in the table): %d or %x in hex", MFTOffset - NTFSOffset,MFTOffset - NTFSOffset)
+			fmt.Println("\n[+] Parsing Master File Table (this can take a while)")
+			MFTBlockArray := getMFTOffsetLocationsFromMFT(deviceLocation, MFTOffset, recordSize, NTFSOffset)
+			fmt.Printf("  --> Found %d MFT Blocks\n\n", len(MFTBlockArray))
+			// The first MFT Block, contains the $MFT file as well. The first 26 files (include the $MFT file, $MFT mirror, etc.) also have some slack ones. Hence we skip parsing them for the sake of simplicity
+			totalRecords = iterateMFT(deviceLocation, uint64(MFTBlockArray[0]), recordSize, 26, NTFSOffset, clusterSize, dumpMode)
+			for blockIndex := 1; blockIndex < len(MFTBlockArray); blockIndex++ {
+				totalRecords = totalRecords + iterateMFT(deviceLocation, uint64(MFTBlockArray[blockIndex]), recordSize, 0, NTFSOffset, clusterSize, dumpMode)
+			}
+			fmt.Printf("\n  --> Found %d files in the $MFT records",totalRecords)
+		}
+	}
+}
+
+var database *sql.DB
+var insertCounter int
+
+func main(){
+
+	// Additional ideas: auto get the SAM file and parse / crack it
+	// Implement security flag and build queriying tool for assessing insecure configurations
+	var help = flag.Bool("help", false, "With this goal i'm trying to achieve a couple of objectives: 1. Try to learn go-lang :), 2. dump MFT files to MFT, 3. carve files.")
+	var deviceLocation = "\\\\.\\physicaldrive0"
+	var dumpMode int
+	
+	var carve = false
+	var fileOffset int
+	var fileLength int
+	var dbFile = "MFTDB.sqlite3"
+	var dumpFile = "output.dump"
+
+	flag.StringVar(&deviceLocation, "deviceLocation", "\\\\.\\physicaldrive0", "Specify the physical disk to dump")
+	flag.IntVar(&dumpMode, "dumpMode", 1, "Select MFT dump output: 1=screen output, 2=SQL")
+	flag.BoolVar(&carve, "carve", false, "Carve out a specific file, instead of dumping the MFT")
+	flag.IntVar(&fileOffset, "fileOffset", 0, "PhysicalDisk offset to start of file you would like to carve out")
+	flag.IntVar(&fileLength, "fileLength", 0, "Length (as indicated by MFT) of file you would like to carve")
+	flag.StringVar(&dbFile, "dbFile", "MFTDB.sqlite3", "Specify the output name of the database in which you would like to store the MFT records")
+	flag.StringVar(&dumpFile, "dumpFile", "output.dump", "Specify the output name of the file you would like to carve")
+	
+	flag.Parse()
+	
+	if *help {
+		flag.Usage()
+		os.Exit(0)
+	}
+	
+	if(carve){
+		if((fileOffset == 0) || (fileLength == 0)){
+			fmt.Println("Please provide file lenght and file offset")
+		} else{
+			dumpToFile(deviceLocation, fileOffset, fileLength, dumpFile)
+		}
+	}
+	if(!carve){
+		// By default start dumping the MFT
+		if(dumpMode == 2){
+			setUpSQLiteDB(dbFile)
+			insertCounter = 0
+		}
+		dumpMFT(deviceLocation, dumpMode)
+	}
+	
+}
+
+
