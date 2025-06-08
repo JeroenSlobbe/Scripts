@@ -12,12 +12,14 @@ command_map = {
     3: ("dirb", "dirb {url} /usr/share/dirb/wordlists/common.txt -o {out}/dirb.txt"),
     4: ("wget", "wget --spider --recursive --level=5 -nd {url} -o {out}/wget.txt"),
     5: ("nmap", "nmap -sV {url} -oN {out}/nmap.txt"),
-    6: ("whatweb", "whatweb -a 3 {url} >> {out}/whatweb.txt")
+    6: ("whatweb", "whatweb -a 3 {url} >> {out}/whatweb.txt"),
+    7: ("fallparams", "fallparams -u {prefix}{url} -c -o {out}/fallparam.txt")
 }
 
 # Argument parser
 parser = argparse.ArgumentParser(description="ToolHarmonize: Modular Recon Scanner")
 parser.add_argument("target_url", nargs="?", help="Target URL or domain")
+parser.add_argument("prefix", nargs="?", help="Prefix for commands that require http:// or https://")
 parser.add_argument("--only", nargs="+", type=int, help="Run only these command numbers")
 parser.add_argument("--exclude", nargs="+", type=int, help="Exclude these command numbers")
 parser.add_argument("--processors-only", action="store_true", help="Run processors only")
@@ -29,12 +31,13 @@ if args.help_screen or not args.target_url:
     for index, (name, _) in command_map.items():
         print(f"{index}. {name}")
     print("\nExamples:")
-    print("  python scanner.py http://target.htb --exclude 4 5")
-    print("  python scanner.py http://target.htb --only 1 6")
-    print("  python scanner.py http://target.htb --processors-only")
+    print("  python scanner.py target.htb --exclude 4 5")
+    print("  python scanner.py target.htb --only 1 6")
+    print("  python scanner.py target.htb --processors-only")
     sys.exit(0)
 
 target = args.target_url
+prefix = args.prefix
 base = "attacksurface"
 raw = os.path.join(base, "rawOutput")
 
@@ -54,7 +57,7 @@ if not args.processors_only:
     # Execute each selected command
     for index in sorted(selected):
         name, cmd_template = command_map[index]
-        command = cmd_template.format(url=target, out=raw)
+        command = cmd_template.format(url=target, prefix=prefix, out=raw)
         print(f"[+] Running {name}...")
 
         try:
