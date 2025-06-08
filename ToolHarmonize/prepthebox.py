@@ -18,11 +18,12 @@ command_map = {
 
 # Argument parser
 parser = argparse.ArgumentParser(description="ToolHarmonize: Modular Recon Scanner")
-parser.add_argument("target_url", nargs="?", help="Target URL or domain")
-parser.add_argument("prefix", nargs="?", help="Prefix for commands that require http:// or https://")
-parser.add_argument("--only", nargs="+", type=int, help="Run only these command numbers")
-parser.add_argument("--exclude", nargs="+", type=int, help="Exclude these command numbers")
-parser.add_argument("--processors-only", action="store_true", help="Run processors only")
+parser.add_argument("target_url", nargs="?", help="Target URL or domain (required)")
+parser.add_argument("--prefix", default="", help="Optional prefix like http:// or https:// (used by specific tools)")
+parser.add_argument("--only", nargs="+", type=int, help="Run only these command numbers (see --help-screen)")
+parser.add_argument("--exclude", nargs="+", type=int, help="Exclude these command numbers (see --help-screen)")
+parser.add_argument("--processors-only", action="store_true", help="Run processors without executing scans")
+parser.add_argument("--skip-processors", action="store_true", help="Skip all processors (only scan)")
 parser.add_argument("--help-screen", action="store_true", help="Show command options and exit")
 args = parser.parse_args()
 
@@ -33,7 +34,9 @@ if args.help_screen or not args.target_url:
     print("\nExamples:")
     print("  python scanner.py target.htb --exclude 4 5")
     print("  python scanner.py target.htb --only 1 6")
+    print("  python scanner.py target.htb --prefix=https://")
     print("  python scanner.py target.htb --processors-only")
+    print("  python scanner.py target.htb --skip-processors")
     sys.exit(0)
 
 target = args.target_url
@@ -42,24 +45,24 @@ base = "attacksurface"
 raw = os.path.join(base, "rawOutput")
 
 if not args.processors_only:
+    # Prepare folders
     for path in [base, raw]:
         if os.path.exists(path):
             shutil.rmtree(path)
         os.makedirs(path)
 
-    # Filter command list
-    selected = set(command_map)
+    # Command selection
+    selected = set(command_map.keys())
     if args.only:
         selected = set(args.only)
     elif args.exclude:
         selected -= set(args.exclude)
 
-    # Execute each selected command
+    # Run each command
     for index in sorted(selected):
         name, cmd_template = command_map[index]
         command = cmd_template.format(url=target, prefix=prefix, out=raw)
         print(f"[+] Running {name}...")
-
         try:
             proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             for line in proc.stdout:
@@ -72,25 +75,28 @@ if not args.processors_only:
         except Exception as e:
             print(f"[-] Error running {name}: {e}\n")
 
-# Run processors
-print("[+] Executing processors...\n")
-processors_dir = "processors"
-if os.path.exists(processors_dir):
-    for filename in os.listdir(processors_dir):
-        if filename.endswith(".py") and not filename.startswith("__"):
-            module_path = os.path.join(processors_dir, filename)
-            module_name = filename[:-3]
-            try:
-                spec = importlib.util.spec_from_file_location(module_name, module_path)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+# Run processors unless explicitly skipped
+if not args.skip_processors:
+    print("[+] Executing processors...\n")
+    processors_dir = "processors"
+    if os.path.exists(processors_dir):
+        for filename in os.listdir(processors_dir):
+            if filename.endswith(".py") and not filename.startswith("__"):
+                module_path = os.path.join(processors_dir, filename)
+                module_name = filename[:-3]
+                try:
+                    spec = importlib.util.spec_from_file_location(module_name, module_path)
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
 
-                for attr in dir(module):
-                    if attr.startswith("process_") and callable(getattr(module, attr)):
-                        print(f"[+] Running {module_name}.{attr}()")
-                        getattr(module, attr)()
+                    for attr in dir(module):
+                        if attr.startswith("process_") and callable(getattr(module, attr)):
+                            print(f"[+] Running {module_name}.{attr}()")
+                            getattr(module, attr)()
 
-            except Exception as e:
-                print(f"[-] Failed in {module_name}: {e}")
+                except Exception as e:
+                    print(f"[-] Failed in {module_name}: {e}")
+    else:
+        print("[-] No 'processors/' folder found.")
 else:
-    print("[-] No 'processors/' folder found.")
+    print("[*] Skipping processors as requested.")
