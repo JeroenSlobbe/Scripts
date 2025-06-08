@@ -25,9 +25,9 @@ for path in [base_dir, output_dir]:
 commands = {
     "whatweb": f"whatweb -a 3 {target_url} >> {output_dir}/whatweb.txt",
     "curl": f"curl -I {target_url} -o {output_dir}/curlHeaders.txt",
-    "dirb": f"dirb {target_url} /usr/share/dirb/wordlists/common.txt -o {output_dir}/dirb_results.txt",
+    "dirb": f"dirb {target_url} /usr/share/dirb/wordlists/common.txt -o {output_dir}/dirb.txt",
     "wget": f"wget --spider --recursive --level=5 -nd {target_url} -o {output_dir}/wget.txt",
-    "nmap": f"nmap -sV {target_url} -oN {output_dir}/nmap_results.txt"
+    "nmap": f"nmap -sV {target_url} -oN {output_dir}/nmap.txt"
 }
 
 # Execute each command with live output
