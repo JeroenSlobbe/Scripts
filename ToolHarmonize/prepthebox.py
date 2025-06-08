@@ -2,60 +2,81 @@ import subprocess
 import sys
 import os
 import shutil
-import importlib
 import importlib.util
+import argparse
 
-# Check if a URL argument is provided
-if len(sys.argv) != 2:
-    print("Usage: python scanner.py <target_url>")
-    sys.exit(1)
-
-target_url = sys.argv[1]
-
-# Set up directory structure
-base_dir = "attacksurface"
-output_dir = os.path.join(base_dir, "rawOutput")
-
-for path in [base_dir, output_dir]:
-    if os.path.exists(path):
-        shutil.rmtree(path)
-    os.makedirs(path)
-
-# Define output file paths and commands
-commands = {
-    "whatweb": f"whatweb -a 3 {target_url} >> {output_dir}/whatweb.txt",
-    "curl": f"curl -I {target_url} -o {output_dir}/curlHeaders.txt",
-    "dirb": f"dirb {target_url} /usr/share/dirb/wordlists/common.txt -o {output_dir}/dirb.txt",
-    "wget": f"wget --spider --recursive --level=5 -nd {target_url} -o {output_dir}/wget.txt",
-    "nmap": f"nmap -sV {target_url} -oN {output_dir}/nmap.txt"
+# Command index map
+command_map = {
+    1: ("gobuster", "gobuster dns -d {url} -w /usr/share/seclists/Discovery/DNS/bitquark-subdomains-top100000.txt -o {out}/gobuster.txt"),
+    2: ("curl", "curl -I {url} -o {out}/curlHeaders.txt"),
+    3: ("dirb", "dirb {url} /usr/share/dirb/wordlists/common.txt -o {out}/dirb.txt"),
+    4: ("wget", "wget --spider --recursive --level=5 -nd {url} -o {out}/wget.txt"),
+    5: ("nmap", "nmap -sV {url} -oN {out}/nmap.txt"),
+    6: ("whatweb", "whatweb -a 3 {url} >> {out}/whatweb.txt")
 }
 
-# Execute each command with live output
-for name, cmd in commands.items():
-    print(f"[+] Running {name}...")
-    try:
-        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        for line in process.stdout:
-            print(line.strip())
-        process.wait()
+# Argument parser
+parser = argparse.ArgumentParser(description="ToolHarmonize: Modular Recon Scanner")
+parser.add_argument("target_url", nargs="?", help="Target URL or domain")
+parser.add_argument("--only", nargs="+", type=int, help="Run only these command numbers")
+parser.add_argument("--exclude", nargs="+", type=int, help="Exclude these command numbers")
+parser.add_argument("--processors-only", action="store_true", help="Run processors only")
+parser.add_argument("--help-screen", action="store_true", help="Show command options and exit")
+args = parser.parse_args()
 
-        if process.returncode == 0:
-            print(f"[+] {name} completed successfully!\n")
-        else:
-            print(f"[-] {name} failed with exit code {process.returncode}\n")
+if args.help_screen or not args.target_url:
+    print("\n🛠 Available Commands:")
+    for index, (name, _) in command_map.items():
+        print(f"{index}. {name}")
+    print("\nExamples:")
+    print("  python scanner.py http://target.htb --exclude 4 5")
+    print("  python scanner.py http://target.htb --only 1 6")
+    print("  python scanner.py http://target.htb --processors-only")
+    sys.exit(0)
 
-    except Exception as e:
-        print(f"[-] Error running {name}: {e}\n")
+target = args.target_url
+base = "attacksurface"
+raw = os.path.join(base, "rawOutput")
 
-# Dynamically import and run all `process_*` functions from `processors/*.py`
-print("[+] Executing processors from 'processors/' folder...\n")
+if not args.processors_only:
+    for path in [base, raw]:
+        if os.path.exists(path):
+            shutil.rmtree(path)
+        os.makedirs(path)
 
+    # Filter command list
+    selected = set(command_map)
+    if args.only:
+        selected = set(args.only)
+    elif args.exclude:
+        selected -= set(args.exclude)
+
+    # Execute each selected command
+    for index in sorted(selected):
+        name, cmd_template = command_map[index]
+        command = cmd_template.format(url=target, out=raw)
+        print(f"[+] Running {name}...")
+
+        try:
+            proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            for line in proc.stdout:
+                print(line.strip())
+            proc.wait()
+            if proc.returncode == 0:
+                print(f"[+] {name} completed successfully!\n")
+            else:
+                print(f"[-] {name} exited with code {proc.returncode}\n")
+        except Exception as e:
+            print(f"[-] Error running {name}: {e}\n")
+
+# Run processors
+print("[+] Executing processors...\n")
 processors_dir = "processors"
 if os.path.exists(processors_dir):
     for filename in os.listdir(processors_dir):
         if filename.endswith(".py") and not filename.startswith("__"):
-            module_name = filename[:-3]
             module_path = os.path.join(processors_dir, filename)
+            module_name = filename[:-3]
             try:
                 spec = importlib.util.spec_from_file_location(module_name, module_path)
                 module = importlib.util.module_from_spec(spec)
@@ -67,6 +88,6 @@ if os.path.exists(processors_dir):
                         getattr(module, attr)()
 
             except Exception as e:
-                print(f"[-] Failed to import or run {module_name}: {e}")
+                print(f"[-] Failed in {module_name}: {e}")
 else:
-    print("[-] No 'processors/' directory found.")
+    print("[-] No 'processors/' folder found.")
