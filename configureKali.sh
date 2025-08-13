@@ -153,6 +153,10 @@ nuclei -update-templates
 sudo msfdb init
 echo -e "[x] Prepared, updated and initialized bunch of tools"
 
+# Bonus nice IDE
+echo "Download: https://code.visualstudio.com/download (deb file)"
+echo "Execute: sudo apt install ./code_1.87.0-1709078641_amd64.deb"
+
 # Goodbye
 end=$(date +%s.%N)
 runtime=$(echo "$end - $start" | bc -l)
