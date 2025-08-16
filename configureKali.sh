@@ -70,6 +70,7 @@ sudo apt install -y \
     wafw00f \
     paramspider \
     xsser \
+    cmseek \
     gobuster \
     
 sudo apt install -y libpcre3-dev 
