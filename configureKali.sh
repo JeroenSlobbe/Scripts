@@ -50,6 +50,7 @@ sudo apt install -y seclists
 sudo apt install -y \
     nodejs \
     npm \
+    skipfish \
     whatweb \
     subfinder \
     dirsearch \
