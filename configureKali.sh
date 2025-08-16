@@ -168,6 +168,7 @@ else
 fi
 
 # Configure and unpack some stuff
+searchsploit -u
 nuclei -update-templates
 sudo msfdb init
 echo -e "[x] Prepared, updated and initialized bunch of tools"
