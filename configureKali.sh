@@ -84,16 +84,33 @@ sudo git clone https://github.com/carlospolop/PEASS-ng.git
 sudo git clone https://github.com/PowerShellMafia/PowerSploit.git
 sudo git clone https://github.com/devanshbatham/paramspider
 
+# SCADA special
+sudo git clone https://github.com/sourceperl/mbtget.git
+
 echo -e "[x] Downloaded custom scripts in /opt"
 
 # Install python modules
 sudo -u "kali" pipx install uploadserver
 sudo -u "kali" pipx install git-dumper
 sudo -u "kali" pipx install xsstrike
+sudo -u "kali" pipx install python-snap7
+sudo -u "kali" pipx install scapy
 
 cd /opt/WhatWaf
 echo $USER | sudo python setup.py install
 echo -e "[x] Installed additional python libaries and tools"
+
+# Install perl modules
+cd /opt/mbtget
+sudo perl Makefile.PL
+sudo make
+sudo make install
+
+# Ruby stuff
+sudo apt upgrade -y ruby
+sudo apt upgrade -y rails
+sudo apt upgrade -y gem
+
 
 # Install go-lang tools
 go install github.com/0xTeles/jsleak/v2/jsleak@latest
