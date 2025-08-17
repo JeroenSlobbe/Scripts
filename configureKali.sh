@@ -97,6 +97,7 @@ sudo -u "kali" pipx install git-dumper
 sudo -u "kali" pipx install xsstrike
 sudo -u "kali" pipx install python-snap7
 sudo -u "kali" pipx install scapy
+sudo -u "kali" pipx install flask
 
 cd /opt/WhatWaf
 echo $USER | sudo python setup.py install
