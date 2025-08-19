@@ -121,12 +121,14 @@ go install github.com/ImAyrix/fallparams@latest
 go install -v github.com/webklex/wappalyzer@main
 go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
 go install -v github.com/rverton/webanalyze/cmd/webanalyze@latest
+go install github.com/tomnomnom/waybackurls@latest
 sudo cp ~/go/bin/jsleak /usr/local/bin
 sudo cp ~/go/bin/fallparams /usr/local/bin
 sudo cp ~/go/bin/wappalyzer /usr/local/bin
 sudo cp ~/go/bin/httpx /usr/local/bin
 sudo cp ~/go/bin/webanalyze /usr/local/bin
 webanalyze -update
+sudo cp ~/go/bin/waybackurls /usr/local/bin
 echo -e "[x] Installed additional go-lang libaries and tools"
 
 
