@@ -158,11 +158,6 @@ sudo mv /tmp/policies.json $file
 sudo chown root:root $file
 echo -e "[x] Added firefox plugins"
 
-# Configure and unpack some stuff
-sudo gzip -d /usr/share/wordlists/rockyou.txt.gz
-sudo updatedb  #fix locate database, so we can find the installed stuff
-echo -e "[x] Configured and unpacked stuff"
-
 # Silence VM and make pentest less obvious (add network stuff later: https://hackmag.com/security/kali-hardening)
 HOSTNAME="Actual-Intelligence"
 sudo hostnamectl set-hostname $HOSTNAME
@@ -179,6 +174,8 @@ fi
 searchsploit -u
 nuclei -update-templates
 sudo msfdb init
+sudo gzip -d /usr/share/wordlists/rockyou.txt.gz
+sudo updatedb  #fix locate database, so we can find the installed stuff
 echo -e "[x] Prepared, updated and initialized bunch of tools"
 
 # Bonus nice IDE
