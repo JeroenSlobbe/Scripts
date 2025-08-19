@@ -73,6 +73,8 @@ sudo apt install -y \
     xsser \
     cmseek \
     gobuster \
+    testssl.sh \
+
     
 sudo apt install -y libpcre3-dev 
 echo -e "[x] Installed additional packages"
