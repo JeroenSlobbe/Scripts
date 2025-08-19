@@ -126,6 +126,7 @@ sudo cp ~/go/bin/fallparams /usr/local/bin
 sudo cp ~/go/bin/wappalyzer /usr/local/bin
 sudo cp ~/go/bin/httpx /usr/local/bin
 sudo cp ~/go/bin/webanalyze /usr/local/bin
+webanalyze -update
 echo -e "[x] Installed additional go-lang libaries and tools"
 
 
