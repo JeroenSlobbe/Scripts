@@ -44,6 +44,7 @@ sudo apt install -y golang-go
 
 # Install additional software
 sudo apt install bc
+sudo apt install obsidian
 sudo apt install -y nuclei
 sudo apt install -y cloud-enum
 sudo apt install -y seclists
