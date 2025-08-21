@@ -48,6 +48,7 @@ sudo apt install obsidian
 sudo apt install -y nuclei
 sudo apt install -y cloud-enum
 sudo apt install -y seclists
+sudo apt install -y pspy
 sudo apt install -y \
     nodejs \
     npm \
