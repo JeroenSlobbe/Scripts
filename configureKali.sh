@@ -180,6 +180,13 @@ sudo gzip -d /usr/share/wordlists/rockyou.txt.gz
 sudo updatedb  #fix locate database, so we can find the installed stuff
 echo -e "[x] Prepared, updated and initialized bunch of tools"
 
+# Prepare staging area
+cd /home/kali
+mkdir staging
+cd staging
+cp /usr/share/pspy/* .
+
+
 # Bonus nice IDE
 echo "Download: https://code.visualstudio.com/download (deb file)"
 echo "Execute: sudo apt install ./code_1.87.0-1709078641_amd64.deb"
