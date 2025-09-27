@@ -1,13 +1,13 @@
 id: conpot-iec104-honeypot-fingerprint
 
 info:
-  name: Conpot IEC104 Honeypot Fingerprint
+  name: Conpot IEC104 Honeypot - TESTFR Confirmation
   author: Jeroen
   severity: info
   description: |
-    Detects IEC104 honeypot behavior (e.g. Conpot) by simulating a full handshake and interrogation sequence.
-    Matches ASDU responses with static COA 7720 (0x1e28)..
-  tags: conpot,iec104,honeypot,scada,fingerprint,nmap
+    Detects IEC104 honeypot behavior by confirming response to TESTFR ACT.
+    Matches the expected last response to the C_IC_NA_1 Interogration frame for 7720 (0x28 0x1e) from Conpot or similar honeypots.
+  tags: conpot,iec104,honeypot,fingerprint,nuclei
 
 tcp:
   - host:
@@ -20,32 +20,12 @@ tcp:
         data: "680407000000"  # STARTDT ACT
         read: 64
       - type: hex
-        data: "680e0000000064010600ffff00000014" # C_IC_NA_1 Interrogation
-        read: 2048
+        data: "680e0000000064010600ffff00000014"  # C_IC_NA_1 Interrogation
+        read: 1024
 
-    matchers-condition: or
+    matchers-condition: and
     matchers:
       - type: binary
         part: body
         binary:
-          - "281e"     # COA 7720 in hex, little_endian
-      - type: binary
-        part: body
-        binary:
-          - "010014"   # M_SP_NA_1 with COT 20
-      - type: binary
-        part: body
-        binary:
-          - "030014"   # M_DP_NA_1 with COT 20
-      - type: binary
-        part: body
-        binary:
-          - "0b0014"   # M_ME_NB_1 with COT 20
-      - type: binary
-        part: body
-        binary:
-          - "0d0014"   # M_ME_NC_1 with COT 20
-      - type: binary
-        part: body
-        binary:
-          - "64000a"   # C_IC_NA_1 response with COT 10 (ActTerm)
+          - "684a0200020001101400281e"  
