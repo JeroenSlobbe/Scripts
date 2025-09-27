@@ -1,0 +1,51 @@
+id: conpot-iec104-honeypot-fingerprint
+
+info:
+  name: Conpot IEC104 Honeypot Fingerprint
+  author: Jeroen
+  severity: info
+  description: |
+    Detects IEC104 honeypot behavior (e.g. Conpot) by simulating a full handshake and interrogation sequence.
+    Matches ASDU responses with static COA 7720 (0x1e28)..
+  tags: conpot,iec104,honeypot,scada,fingerprint,nmap
+
+tcp:
+  - host:
+      - '{{Host}}:2404'
+    inputs:
+      - type: hex
+        data: "680443000000"  # TESTFR ACT
+        read: 64
+      - type: hex
+        data: "680407000000"  # STARTDT ACT
+        read: 64
+      - type: hex
+        data: "680e0000000064010600ffff00000014" # C_IC_NA_1 Interrogation
+        read: 2048
+
+    matchers-condition: or
+    matchers:
+      - type: binary
+        part: body
+        binary:
+          - "281e"     # COA 7720 in hex, little_endian
+      - type: binary
+        part: body
+        binary:
+          - "010014"   # M_SP_NA_1 with COT 20
+      - type: binary
+        part: body
+        binary:
+          - "030014"   # M_DP_NA_1 with COT 20
+      - type: binary
+        part: body
+        binary:
+          - "0b0014"   # M_ME_NB_1 with COT 20
+      - type: binary
+        part: body
+        binary:
+          - "0d0014"   # M_ME_NC_1 with COT 20
+      - type: binary
+        part: body
+        binary:
+          - "64000a"   # C_IC_NA_1 response with COT 10 (ActTerm)
